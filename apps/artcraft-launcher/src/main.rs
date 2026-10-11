@@ -165,7 +165,24 @@ fn adapter_rank(backend: eframe::wgpu::Backend, device_type: eframe::wgpu::Devic
     (backend != Backend::Dx12, device)
 }
 
-#[cfg(not(windows))]
+/// wgpu's adapter on Linux and the BSDs: the GPU the desktop runs on. egui asks for the
+/// high-performance GPU, which on a hybrid laptop in PRIME on-demand mode is the discrete one while
+/// the display server runs on the integrated one: every frame then crosses between the GPUs, and
+/// while the window is resized it shows stale or garbled frames and can stop drawing (issue #69).
+/// With no preference wgpu takes the first adapter Vulkan lists, and Mesa's device-select layer
+/// lists the display server's GPU first (or the one `DRI_PRIME` picks). `WGPU_POWER_PREF`
+/// (`low`, `high` or `none`) still overrides it.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn wgpu_options() -> eframe::WgpuConfiguration {
+    use eframe::wgpu::PowerPreference;
+    let mut config = eframe::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup {
+        setup.power_preference = PowerPreference::from_env().unwrap_or(PowerPreference::None);
+    }
+    config
+}
+
+#[cfg(target_os = "macos")]
 fn wgpu_options() -> eframe::WgpuConfiguration {
     eframe::WgpuConfiguration::default()
 }
@@ -855,5 +872,18 @@ mod tests {
         assert!(adapter_rank(Backend::Dx12, integrated, false) < warp);
         assert!(adapter_rank(Backend::Dx12, discrete, false) < adapter_rank(Backend::Dx12, integrated, false));
         assert!(adapter_rank(Backend::Dx12, integrated, true) < adapter_rank(Backend::Dx12, discrete, true));
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn linux_draws_on_the_desktops_gpu_unless_told_otherwise() {
+        use eframe::wgpu::PowerPreference;
+        let config = wgpu_options();
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &config.wgpu_setup else {
+            panic!("the launcher creates its own wgpu instance");
+        };
+        // egui would ask for the discrete GPU: on a PRIME laptop that's not the desktop's (issue #69).
+        let expected = PowerPreference::from_env().unwrap_or(PowerPreference::None);
+        assert_eq!(setup.power_preference, expected);
     }
 }
