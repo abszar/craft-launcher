@@ -170,14 +170,28 @@ fn adapter_rank(backend: eframe::wgpu::Backend, device_type: eframe::wgpu::Devic
 /// the display server runs on the integrated one: every frame then crosses between the GPUs, and
 /// while the window is resized it shows stale or garbled frames and can stop drawing (issue #69).
 /// With no preference wgpu takes the first adapter Vulkan lists, and Mesa's device-select layer
-/// lists the display server's GPU first (or the one `DRI_PRIME` picks). `WGPU_POWER_PREF`
-/// (`low`, `high` or `none`) still overrides it.
+/// lists the display server's GPU first (or the one `DRI_PRIME` picks). Without that layer the
+/// order follows the ICD files, where lavapipe (`lvp_icd`) can sort before the real driver, so a
+/// software rasterizer only wins when nothing else can draw. `WGPU_POWER_PREF` (`low`, `high` or
+/// `none`) still overrides it, and then wgpu picks the adapter itself.
 #[cfg(not(any(windows, target_os = "macos")))]
 fn wgpu_options() -> eframe::WgpuConfiguration {
-    use eframe::wgpu::PowerPreference;
+    use eframe::wgpu::{DeviceType, PowerPreference};
     let mut config = eframe::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup {
-        setup.power_preference = PowerPreference::from_env().unwrap_or(PowerPreference::None);
+        if let Some(preference) = PowerPreference::from_env() {
+            setup.power_preference = preference;
+        } else {
+            setup.power_preference = PowerPreference::None;
+            setup.native_adapter_selector = Some(Arc::new(|adapters, surface| {
+                adapters
+                    .iter()
+                    .filter(|a| surface.is_none_or(|s| a.is_surface_supported(s)))
+                    .min_by_key(|a| a.get_info().device_type == DeviceType::Cpu)
+                    .cloned()
+                    .ok_or_else(|| "no graphics adapter can draw to the window".to_owned())
+            }));
+        }
     }
     config
 }
